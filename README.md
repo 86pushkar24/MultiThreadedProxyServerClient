@@ -5,19 +5,18 @@ This project is implemented using `C` and Parsing of HTTP referred from <a href 
 
 ## Index
 
-- [Project Theory](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#project-theory)
-- [How to Run](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#How-to-Run)
-- [Demo](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#Demo)
-- [Contributing](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#contributing)
+- [Project Theory](https://github.com/86.pushkar.24/MultiThreadedProxyServerClient#projecxt-theory)
+- [How to Run](https://github.com/86.pushkar.24/MultiThreadedProxyServerClient#How-to-Run)
+- [Demo](https://github.com/86.pushkar.24/MultiThreadedProxyServerClient#Demo)
+- [Contributing](https://github.com/86.pushkar.24/MultiThreadedProxyServerClient#contributing)
 
 ## Project Theory
 
-[[Back to top]](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#index)
 
 ##### Introduction
 
 ##### Basic Working Flow of the Proxy Server:
-![](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient/blob/main/pics/UML.JPG)
+![](pics/UML.JPG)
 
 ##### How did we implement Multi-threading?
 - Used Semaphore instead of Condition Variables and pthread_join() and pthread_exit() function. 
@@ -43,7 +42,7 @@ This project is implemented using `C` and Parsing of HTTP referred from <a href 
 - Semaphore
 - Cache (LRU algorithm is used in it)
 
-##### Limitations ​
+##### Scope of Improvement (Feel free to raise PRs) ​
 - If a URL opens multiple clients itself, then our cache will store each client’s response as a separate element in the linked list. So, during retrieval from the cache, only a chunk of response will be send and the website will not open
 - Fixed size of cache element, so big websites may not be stored in cache. 
 
@@ -51,11 +50,6 @@ This project is implemented using `C` and Parsing of HTTP referred from <a href 
 - This code can be implemented using multiprocessing that can speed up the process with parallelism.
 - We can decide which type of websites should be allowed by extending the code.
 - We can implement requests like POST with this code.
-
-
-# Note :-
-- Code is well commented. For any doubt you can refer to the comments.
-
 
 ## How to Run
 
@@ -69,17 +63,14 @@ $ ./proxy <port no.>
 
 # Note:
 - This code can only be run in Linux Machine. Please disable your browser cache.
-- To run the proxy without cache Change the name of the file (`proxy_server_with_cache.c to proxy_server_without_cache.c`) MakeFile.
+- To run the proxy without cache you can use `proxy_server_without_cache.c` file.
 
 ## Demo
-![](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient/blob/main/pics/cache.png)
+![](pics/cache.png)
 - When website is opened for the first time (`url not found`) then cache will be miss.
 - Then if you again open that website again then `Data is retrieved from the cache` will be printed.
 
 ## Contributing
 
-[[Back to top]](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient#index)
-
-Feel free to add some useful. You can see `How this code can be extended`. Use ideas from there and feel free to fork and CHANGE. 
-
+[[Back to top]](https://github.com/86pushkar24/MultiThreadedProxyServerClient#index)
 #### Enjoy CODE and pull requests are highly appreciated.
