@@ -118,23 +118,23 @@ void remove_cache_element();							// Remove oldest (LRU) element from cache
  * - head, cache_size: Must be protected by lock during modifications
  */
 
-int port_number = 8080;		// Default listening port - configurable via command line
-int proxy_socketId;			// Main server socket descriptor for accepting connections
-pthread_t tid[MAX_CLIENTS]; // Thread identifiers for each client handler
-							// Question: What happens if we exceed MAX_CLIENTS?
+int proxy_server_port = 8080;			  // Default listening port - configurable via command line
+int proxy_server_socket_fd;				  // Main server socket descriptor for accepting connections
+pthread_t client_thread_ids[MAX_CLIENTS]; // Thread identifiers for each client handler
+										  // Question: What happens if we exceed MAX_CLIENTS?
 
-sem_t seamaphore; // Semaphore to limit concurrent connections
-				  // Prevents resource exhaustion under high load
-				  // Think: Why use semaphore instead of just checking thread count?
+sem_t connection_semaphore; // Semaphore to limit concurrent connections
+							// Prevents resource exhaustion under high load
+							// Think: Why use semaphore instead of just checking thread count?
 
-pthread_mutex_t lock; // Mutex for thread-safe cache operations
-					  // Critical section protection for shared cache data structure
-					  // Design Question: Could we use read-write locks for better performance?
+pthread_mutex_t cache_mutex_lock; // Mutex for thread-safe cache operations
+								  // Critical section protection for shared cache data structure
+								  // Design Question: Could we use read-write locks for better performance?
 
-cache_element *head; // Head pointer of cache linked list
-					 // Global state: requires synchronization
-int cache_size;		 // Current total size of cached data in bytes
-					 // Used for eviction decisions when approaching MAX_SIZE
+cache_element *cache_head_pointer; // Head pointer of cache linked list
+								   // Global state: requires synchronization
+int total_cache_size_bytes;		   // Current total size of cached data in bytes
+								   // Used for eviction decisions when approaching MAX_SIZE
 
 /*
  * =====================================================================================
@@ -156,65 +156,65 @@ int cache_size;		 // Current total size of cached data in bytes
  * - Should different error types have different response formats?
  */
 
-int sendErrorMessage(int socket, int status_code)
+int sendErrorMessage(int client_socket_fd, int status_code)
 {
-	char str[1024];		  // Buffer for complete HTTP error response
-	char currentTime[50]; // RFC-compliant timestamp string
-	time_t now = time(0); // Current Unix timestamp
+	char http_error_response[1024];	   // Buffer for complete HTTP error response
+	char current_timestamp_string[50]; // RFC-compliant timestamp string
+	time_t current_time = time(0);	   // Current Unix timestamp
 
 	// Convert timestamp to GMT format for HTTP Date header
 	// GMT is required by HTTP/1.1 specification (RFC 7231)
-	struct tm data = *gmtime(&now);
-	strftime(currentTime, sizeof(currentTime), "%a, %d %b %Y %H:%M:%S %Z", &data);
+	struct tm date_structure = *gmtime(&current_time);
+	strftime(current_timestamp_string, sizeof(current_timestamp_string), "%a, %d %b %Y %H:%M:%S %Z", &date_structure);
 
 	switch (status_code)
 	{
 	case 400:
 		// Bad Request: Client sent malformed or invalid request
 		// Common causes: Invalid HTTP syntax, missing required headers
-		snprintf(str, sizeof(str), "HTTP/1.1 400 Bad Request\r\nContent-Length: 95\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\n<BODY><H1>400 Bad Rqeuest</H1>\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 400 Bad Request\r\nContent-Length: 95\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\n<BODY><H1>400 Bad Rqeuest</H1>\n</BODY></HTML>", current_timestamp_string);
 		printf("400 Bad Request\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	case 403:
 		// Forbidden: Server understood request but refuses to authorize it
 		// Could be used for access control, content filtering, etc.
-		snprintf(str, sizeof(str), "HTTP/1.1 403 Forbidden\r\nContent-Length: 112\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\n<BODY><H1>403 Forbidden</H1><br>Permission Denied\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 403 Forbidden\r\nContent-Length: 112\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\n<BODY><H1>403 Forbidden</H1><br>Permission Denied\n</BODY></HTML>", current_timestamp_string);
 		printf("403 Forbidden\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	case 404:
 		// Not Found: Requested resource doesn't exist
 		// In proxy context, this might indicate upstream server issues
-		snprintf(str, sizeof(str), "HTTP/1.1 404 Not Found\r\nContent-Length: 91\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n<BODY><H1>404 Not Found</H1>\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 404 Not Found\r\nContent-Length: 91\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n<BODY><H1>404 Not Found</H1>\n</BODY></HTML>", current_timestamp_string);
 		printf("404 Not Found\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	case 500:
 		// Internal Server Error: Something went wrong in our proxy
 		// Should be logged for debugging production issues
-		snprintf(str, sizeof(str), "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 115\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\n<BODY><H1>500 Internal Server Error</H1>\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 115\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\n<BODY><H1>500 Internal Server Error</H1>\n</BODY></HTML>", current_timestamp_string);
 		// printf("500 Internal Server Error\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	case 501:
 		// Not Implemented: Request method not supported
 		// Our proxy only supports GET - all others should return 501
-		snprintf(str, sizeof(str), "HTTP/1.1 501 Not Implemented\r\nContent-Length: 103\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Implemented</TITLE></HEAD>\n<BODY><H1>501 Not Implemented</H1>\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 501 Not Implemented\r\nContent-Length: 103\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Implemented</TITLE></HEAD>\n<BODY><H1>501 Not Implemented</H1>\n</BODY></HTML>", current_timestamp_string);
 		printf("501 Not Implemented\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	case 505:
 		// HTTP Version Not Supported
 		// We only support HTTP/1.0 and HTTP/1.1
-		snprintf(str, sizeof(str), "HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 125\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>505 HTTP Version Not Supported</TITLE></HEAD>\n<BODY><H1>505 HTTP Version Not Supported</H1>\n</BODY></HTML>", currentTime);
+		snprintf(http_error_response, sizeof(http_error_response), "HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 125\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: VaibhavN/14785\r\n\r\n<HTML><HEAD><TITLE>505 HTTP Version Not Supported</TITLE></HEAD>\n<BODY><H1>505 HTTP Version Not Supported</H1>\n</BODY></HTML>", current_timestamp_string);
 		printf("505 HTTP Version Not Supported\n");
-		send(socket, str, strlen(str), 0);
+		send(client_socket_fd, http_error_response, strlen(http_error_response), 0);
 		break;
 
 	default:
@@ -243,13 +243,13 @@ int sendErrorMessage(int socket, int status_code)
  * - What about IPv6 support?
  */
 
-int connectRemoteServer(char *host_addr, int port_num)
+int connectRemoteServer(char *remote_hostname, int remote_port)
 {
 	// Step 1: Create a TCP socket for communication with remote server
 	// AF_INET = IPv4, SOCK_STREAM = TCP, 0 = default protocol
-	int remoteSocket = socket(AF_INET, SOCK_STREAM, 0);
+	int remote_server_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (remoteSocket < 0)
+	if (remote_server_socket_fd < 0)
 	{
 		printf("Error in Creating Socket.\n");
 		return -1; // Return error indicator
@@ -258,8 +258,8 @@ int connectRemoteServer(char *host_addr, int port_num)
 	// Step 2: Resolve hostname to IP address using DNS
 	// gethostbyname() performs DNS lookup - could block for several seconds
 	// Modern alternative: getaddrinfo() with better IPv6 support
-	struct hostent *host = gethostbyname(host_addr);
-	if (host == NULL)
+	struct hostent *remote_host_info = gethostbyname(remote_hostname);
+	if (remote_host_info == NULL)
 	{
 		fprintf(stderr, "No such host exists.\n");
 		return -1; // DNS resolution failed
@@ -267,20 +267,20 @@ int connectRemoteServer(char *host_addr, int port_num)
 
 	// Step 3: Set up server address structure for connection
 	// This structure tells the kernel where to connect
-	struct sockaddr_in server_addr;
+	struct sockaddr_in remote_server_addr;
 
-	bzero((char *)&server_addr, sizeof(server_addr)); // Clear structure
-	server_addr.sin_family = AF_INET;				  // IPv4 address family
-	server_addr.sin_port = htons(port_num);			  // Convert port to network byte order
+	bzero((char *)&remote_server_addr, sizeof(remote_server_addr)); // Clear structure
+	remote_server_addr.sin_family = AF_INET;						// IPv4 address family
+	remote_server_addr.sin_port = htons(remote_port);				// Convert port to network byte order
 
 	// Copy IP address from DNS result to address structure
 	// bcopy is deprecated - memcpy would be more modern
-	bcopy((char *)host->h_addr, (char *)&server_addr.sin_addr.s_addr, host->h_length);
+	bcopy((char *)remote_host_info->h_addr, (char *)&remote_server_addr.sin_addr.s_addr, remote_host_info->h_length);
 
 	// Step 4: Establish TCP connection to remote server
 	// This performs the TCP three-way handshake
 	// Can block for several seconds if server is slow or unreachable
-	if (connect(remoteSocket, (struct sockaddr *)&server_addr, (socklen_t)sizeof(server_addr)) < 0)
+	if (connect(remote_server_socket_fd, (struct sockaddr *)&remote_server_addr, (socklen_t)sizeof(remote_server_addr)) < 0)
 	{
 		fprintf(stderr, "Error in connecting !\n");
 		return -1; // Connection failed
@@ -288,7 +288,7 @@ int connectRemoteServer(char *host_addr, int port_num)
 
 	// Connection successful - return socket descriptor
 	// Think: Should we set socket options like SO_KEEPALIVE here?
-	return remoteSocket;
+	return remote_server_socket_fd;
 }
 
 /*
@@ -313,32 +313,32 @@ int connectRemoteServer(char *host_addr, int port_num)
  * - What about HTTP redirects (301, 302)?
  */
 
-int handle_request(int clientSocket, ParsedRequest *request, char *tempReq)
+int handle_request(int client_socket_fd, ParsedRequest *parsed_http_request, char *original_request_string)
 {
 	// Step 1: Reconstruct HTTP request line
 	// Format: "GET /path HTTP/1.1\r\n"
-	char *buf = (char *)malloc(sizeof(char) * MAX_BYTES);
-	strcpy(buf, "GET ");		// Only support GET method
-	strcat(buf, request->path); // Add requested path
-	strcat(buf, " ");
-	strcat(buf, request->version); // Add HTTP version
-	strcat(buf, "\r\n");		   // HTTP line terminator
+	char *http_request_buffer = (char *)malloc(sizeof(char) * MAX_BYTES);
+	strcpy(http_request_buffer, "GET ");					// Only support GET method
+	strcat(http_request_buffer, parsed_http_request->path); // Add requested path
+	strcat(http_request_buffer, " ");
+	strcat(http_request_buffer, parsed_http_request->version); // Add HTTP version
+	strcat(http_request_buffer, "\r\n");					   // HTTP line terminator
 
-	size_t len = strlen(buf);
+	size_t current_buffer_length = strlen(http_request_buffer);
 
 	// Step 2: Set critical HTTP headers
 	// Force connection close to simplify proxy logic
 	// HTTP/1.1 defaults to keep-alive, but that complicates proxy implementation
-	if (ParsedHeader_set(request, "Connection", "close") < 0)
+	if (ParsedHeader_set(parsed_http_request, "Connection", "close") < 0)
 	{
 		printf("set header key not work\n");
 	}
 
 	// Ensure Host header is present (required by HTTP/1.1)
 	// Many servers reject requests without proper Host header
-	if (ParsedHeader_get(request, "Host") == NULL)
+	if (ParsedHeader_get(parsed_http_request, "Host") == NULL)
 	{
-		if (ParsedHeader_set(request, "Host", request->host) < 0)
+		if (ParsedHeader_set(parsed_http_request, "Host", parsed_http_request->host) < 0)
 		{
 			printf("Set \"Host\" header key not working\n");
 		}
@@ -346,72 +346,72 @@ int handle_request(int clientSocket, ParsedRequest *request, char *tempReq)
 
 	// Step 3: Append all headers to request buffer
 	// This serializes the parsed headers back into HTTP format
-	if (ParsedRequest_unparse_headers(request, buf + len, (size_t)MAX_BYTES - len) < 0)
+	if (ParsedRequest_unparse_headers(parsed_http_request, http_request_buffer + current_buffer_length, (size_t)MAX_BYTES - current_buffer_length) < 0)
 	{
 		printf("unparse failed\n");
 		// Continue anyway - some servers might accept requests without headers
 	}
 
 	// Step 4: Determine target server port
-	int server_port = 80; // Default HTTP port
-	if (request->port != NULL)
-		server_port = atoi(request->port); // Use specific port if provided
+	int target_server_port = 80; // Default HTTP port
+	if (parsed_http_request->port != NULL)
+		target_server_port = atoi(parsed_http_request->port); // Use specific port if provided
 
 	// Step 5: Connect to remote server
-	int remoteSocketID = connectRemoteServer(request->host, server_port);
+	int remote_server_socket_fd = connectRemoteServer(parsed_http_request->host, target_server_port);
 
-	if (remoteSocketID < 0)
+	if (remote_server_socket_fd < 0)
 		return -1; // Connection failed
 
 	// Step 6: Send HTTP request to remote server
-	int bytes_send = send(remoteSocketID, buf, strlen(buf), 0);
+	int bytes_sent_to_server = send(remote_server_socket_fd, http_request_buffer, strlen(http_request_buffer), 0);
 
-	bzero(buf, MAX_BYTES); // Clear buffer for receiving response
+	bzero(http_request_buffer, MAX_BYTES); // Clear buffer for receiving response
 
 	// Step 7: Receive response from remote server and forward to client
-	bytes_send = recv(remoteSocketID, buf, MAX_BYTES - 1, 0);
+	bytes_sent_to_server = recv(remote_server_socket_fd, http_request_buffer, MAX_BYTES - 1, 0);
 
 	// Dynamic buffer for caching complete response
-	char *temp_buffer = (char *)malloc(sizeof(char) * MAX_BYTES);
-	int temp_buffer_size = MAX_BYTES;
-	int temp_buffer_index = 0;
+	char *complete_response_buffer = (char *)malloc(sizeof(char) * MAX_BYTES);
+	int response_buffer_allocated_size = MAX_BYTES;
+	int response_buffer_current_index = 0;
 
 	// Response forwarding loop
-	while (bytes_send > 0)
+	while (bytes_sent_to_server > 0)
 	{
 		// Forward response chunk to client immediately
-		bytes_send = send(clientSocket, buf, bytes_send, 0);
+		bytes_sent_to_server = send(client_socket_fd, http_request_buffer, bytes_sent_to_server, 0);
 
 		// Store response chunk in cache buffer
-		for (int i = 0; i < bytes_send / sizeof(char); i++)
+		for (int byte_index = 0; byte_index < bytes_sent_to_server / sizeof(char); byte_index++)
 		{
-			temp_buffer[temp_buffer_index] = buf[i];
-			temp_buffer_index++;
+			complete_response_buffer[response_buffer_current_index] = http_request_buffer[byte_index];
+			response_buffer_current_index++;
 		}
 
 		// Expand cache buffer if needed
 		// Critical: This could cause memory issues with very large responses
-		temp_buffer_size += MAX_BYTES;
-		temp_buffer = (char *)realloc(temp_buffer, temp_buffer_size);
+		response_buffer_allocated_size += MAX_BYTES;
+		complete_response_buffer = (char *)realloc(complete_response_buffer, response_buffer_allocated_size);
 
-		if (bytes_send < 0)
+		if (bytes_sent_to_server < 0)
 		{
 			perror("Error in sending data to client socket.\n");
 			break;
 		}
 
-		bzero(buf, MAX_BYTES); // Clear buffer for next chunk
-		bytes_send = recv(remoteSocketID, buf, MAX_BYTES - 1, 0);
+		bzero(http_request_buffer, MAX_BYTES); // Clear buffer for next chunk
+		bytes_sent_to_server = recv(remote_server_socket_fd, http_request_buffer, MAX_BYTES - 1, 0);
 	}
 
 	// Step 8: Cache the complete response
-	temp_buffer[temp_buffer_index] = '\0'; // Null-terminate
-	free(buf);
-	add_cache_element(temp_buffer, strlen(temp_buffer), tempReq);
+	complete_response_buffer[response_buffer_current_index] = '\0'; // Null-terminate
+	free(http_request_buffer);
+	add_cache_element(complete_response_buffer, strlen(complete_response_buffer), original_request_string);
 	printf("Done\n");
-	free(temp_buffer);
+	free(complete_response_buffer);
 
-	close(remoteSocketID); // Close connection to remote server
+	close(remote_server_socket_fd); // Close connection to remote server
 	return 0;
 }
 
@@ -436,24 +436,24 @@ int handle_request(int clientSocket, ParsedRequest *request, char *tempReq)
  * - Should we downgrade HTTP/1.1 to HTTP/1.0 for simpler proxy logic?
  */
 
-int checkHTTPversion(char *msg)
+int checkHTTPversion(char *http_version_string)
 {
-	int version = -1; // Default to invalid version
+	int version_support_status = -1; // Default to invalid version
 
-	if (strncmp(msg, "HTTP/1.1", 8) == 0)
+	if (strncmp(http_version_string, "HTTP/1.1", 8) == 0)
 	{
-		version = 1; // HTTP/1.1 supported
+		version_support_status = 1; // HTTP/1.1 supported
 	}
-	else if (strncmp(msg, "HTTP/1.0", 8) == 0)
+	else if (strncmp(http_version_string, "HTTP/1.0", 8) == 0)
 	{
-		version = 1; // HTTP/1.0 supported (treating same as 1.1)
+		version_support_status = 1; // HTTP/1.0 supported (treating same as 1.1)
 	}
 	else
 	{
-		version = -1; // Unsupported version
+		version_support_status = -1; // Unsupported version
 	}
 
-	return version;
+	return version_support_status;
 }
 
 /*
@@ -484,36 +484,36 @@ int checkHTTPversion(char *msg)
  * - How would you implement request/response logging?
  */
 
-void *thread_fn(void *socketNew)
+void *thread_fn(void *client_socket_ptr)
 {
 	// Step 1: Acquire semaphore slot to prevent server overload
 	// This blocks if we already have MAX_CLIENTS active threads
-	sem_wait(&seamaphore);
-	int p;
-	sem_getvalue(&seamaphore, &p);
-	printf("semaphore value:%d\n", p); // Debug: show available slots
+	sem_wait(&connection_semaphore);
+	int available_connection_slots;
+	sem_getvalue(&connection_semaphore, &available_connection_slots);
+	printf("semaphore value:%d\n", available_connection_slots); // Debug: show available slots
 
 	// Step 2: Extract client socket from thread argument
-	int *t = (int *)(socketNew);
-	int socket = *t;			// Client socket descriptor
-	int bytes_send_client, len; // Byte counters for network operations
+	int *socket_fd_ptr = (int *)(client_socket_ptr);
+	int client_socket_fd = *socket_fd_ptr;					// Client socket descriptor
+	int bytes_received_from_client, current_request_length; // Byte counters for network operations
 
 	// Step 3: Allocate buffer for receiving HTTP request
-	char *buffer = (char *)calloc(MAX_BYTES, sizeof(char)); // Zero-initialized buffer
+	char *http_request_buffer = (char *)calloc(MAX_BYTES, sizeof(char)); // Zero-initialized buffer
 
-	bzero(buffer, MAX_BYTES);								// Extra safety - clear buffer
-	bytes_send_client = recv(socket, buffer, MAX_BYTES, 0); // Receive initial data
+	bzero(http_request_buffer, MAX_BYTES);													// Extra safety - clear buffer
+	bytes_received_from_client = recv(client_socket_fd, http_request_buffer, MAX_BYTES, 0); // Receive initial data
 
 	// Step 4: Receive complete HTTP request
 	// HTTP requests end with "\r\n\r\n" - we must receive the complete request
-	while (bytes_send_client > 0)
+	while (bytes_received_from_client > 0)
 	{
-		len = strlen(buffer);
+		current_request_length = strlen(http_request_buffer);
 		// Keep receiving until we find the HTTP request terminator
-		if (strstr(buffer, "\r\n\r\n") == NULL)
+		if (strstr(http_request_buffer, "\r\n\r\n") == NULL)
 		{
 			// Request incomplete - receive more data
-			bytes_send_client = recv(socket, buffer + len, MAX_BYTES - len, 0);
+			bytes_received_from_client = recv(client_socket_fd, http_request_buffer + current_request_length, MAX_BYTES - current_request_length, 0);
 		}
 		else
 		{
@@ -523,112 +523,112 @@ void *thread_fn(void *socketNew)
 
 	// Debug output (commented) - useful for troubleshooting
 	// printf("--------------------------------------------\n");
-	// printf("%s\n",buffer);
-	// printf("----------------------%d----------------------\n",strlen(buffer));
+	// printf("%s\n",http_request_buffer);
+	// printf("----------------------%d----------------------\n",strlen(http_request_buffer));
 
 	// Step 5: Create copy of request for cache key
-	char *tempReq = (char *)malloc(strlen(buffer) * sizeof(char) + 1);
-	// Both tempReq and buffer store the complete HTTP request
-	for (int i = 0; i < strlen(buffer); i++)
+	char *cache_key_string = (char *)malloc(strlen(http_request_buffer) * sizeof(char) + 1);
+	// Both cache_key_string and http_request_buffer store the complete HTTP request
+	for (int char_index = 0; char_index < strlen(http_request_buffer); char_index++)
 	{
-		tempReq[i] = buffer[i];
+		cache_key_string[char_index] = http_request_buffer[char_index];
 	}
 
 	// Step 6: Check if response exists in cache
-	struct cache_element *temp = find(tempReq);
+	struct cache_element *cached_response = find(cache_key_string);
 
-	if (temp != NULL)
+	if (cached_response != NULL)
 	{
 		// CACHE HIT: Send cached response directly to client
 		printf("Data retrived from the Cache\n\n");
 
-		int size = temp->len / sizeof(char);
-		int pos = 0;
-		char response[MAX_BYTES];
+		int cached_response_size = cached_response->len / sizeof(char);
+		int current_send_position = 0;
+		char response_chunk_buffer[MAX_BYTES];
 
 		// Send cached response in chunks
-		while (pos < size)
+		while (current_send_position < cached_response_size)
 		{
-			bzero(response, MAX_BYTES);
-			for (int i = 0; i < MAX_BYTES; i++)
+			bzero(response_chunk_buffer, MAX_BYTES);
+			for (int chunk_byte_index = 0; chunk_byte_index < MAX_BYTES; chunk_byte_index++)
 			{
-				response[i] = temp->data[pos]; // Copy cached data to response buffer
-				pos++;
+				response_chunk_buffer[chunk_byte_index] = cached_response->data[current_send_position]; // Copy cached data to response buffer
+				current_send_position++;
 			}
-			send(socket, response, MAX_BYTES, 0); // Send chunk to client
+			send(client_socket_fd, response_chunk_buffer, MAX_BYTES, 0); // Send chunk to client
 		}
-		printf("%s\n\n", response);
+		printf("%s\n\n", response_chunk_buffer);
 	}
 
-	else if (bytes_send_client > 0)
+	else if (bytes_received_from_client > 0)
 	{
 		// CACHE MISS: Process request and forward to origin server
-		len = strlen(buffer);
+		current_request_length = strlen(http_request_buffer);
 
 		// Step 7: Parse HTTP request using our custom parser
-		ParsedRequest *request = ParsedRequest_create();
+		ParsedRequest *parsed_http_request = ParsedRequest_create();
 
 		// ParsedRequest_parse returns 0 on success, -1 on failure
-		if (ParsedRequest_parse(request, buffer, len) < 0)
+		if (ParsedRequest_parse(parsed_http_request, http_request_buffer, current_request_length) < 0)
 		{
 			printf("Parsing failed\n");
 			// Should we send 400 Bad Request here?
 		}
 		else
 		{
-			bzero(buffer, MAX_BYTES); // Clear buffer for reuse
+			bzero(http_request_buffer, MAX_BYTES); // Clear buffer for reuse
 
 			// Step 8: Validate request method and version
-			if (!strcmp(request->method, "GET"))
+			if (!strcmp(parsed_http_request->method, "GET"))
 			{
 				// Only support GET method (most common for web browsing)
-				if (request->host && request->path && (checkHTTPversion(request->version) == 1))
+				if (parsed_http_request->host && parsed_http_request->path && (checkHTTPversion(parsed_http_request->version) == 1))
 				{
 					// Valid GET request - forward to origin server
-					bytes_send_client = handle_request(socket, request, tempReq);
-					if (bytes_send_client == -1)
+					bytes_received_from_client = handle_request(client_socket_fd, parsed_http_request, cache_key_string);
+					if (bytes_received_from_client == -1)
 					{
-						sendErrorMessage(socket, 500); // Forward failed
+						sendErrorMessage(client_socket_fd, 500); // Forward failed
 					}
 				}
 				else
 				{
-					sendErrorMessage(socket, 500); // Missing required fields
+					sendErrorMessage(client_socket_fd, 500); // Missing required fields
 				}
 			}
 			else
 			{
 				// Unsupported HTTP method (POST, PUT, DELETE, etc.)
 				printf("This code doesn't support any method other than GET\n");
-				sendErrorMessage(socket, 501); // Not Implemented
+				sendErrorMessage(client_socket_fd, 501); // Not Implemented
 			}
 		}
 
 		// Step 9: Clean up parsed request
-		ParsedRequest_destroy(request);
+		ParsedRequest_destroy(parsed_http_request);
 	}
 
-	else if (bytes_send_client < 0)
+	else if (bytes_received_from_client < 0)
 	{
 		// Network error while receiving from client
 		perror("Error in receiving from client.\n");
 	}
-	else if (bytes_send_client == 0)
+	else if (bytes_received_from_client == 0)
 	{
 		// Client closed connection gracefully
 		printf("Client disconnected!\n");
 	}
 
 	// Step 10: Clean up and release resources
-	shutdown(socket, SHUT_RDWR); // Graceful socket shutdown
-	close(socket);				 // Close client connection
-	free(buffer);				 // Free request buffer
-	sem_post(&seamaphore);		 // Release semaphore slot for new clients
+	shutdown(client_socket_fd, SHUT_RDWR); // Graceful socket shutdown
+	close(client_socket_fd);			   // Close client connection
+	free(http_request_buffer);			   // Free request buffer
+	sem_post(&connection_semaphore);	   // Release semaphore slot for new clients
 
-	sem_getvalue(&seamaphore, &p);
-	printf("Semaphore post value:%d\n", p); // Debug: show available slots
-	free(tempReq);							// Free cache key copy
-	return NULL;							// Thread terminates
+	sem_getvalue(&connection_semaphore, &available_connection_slots);
+	printf("Semaphore post value:%d\n", available_connection_slots); // Debug: show available slots
+	free(cache_key_string);											 // Free cache key copy
+	return NULL;													 // Thread terminates
 }
 
 /*
@@ -659,17 +659,17 @@ void *thread_fn(void *socketNew)
 int main(int argc, char *argv[])
 {
 	// Variables for client connection handling
-	int client_socketId, client_len;			 // Store client socket and address length
-	struct sockaddr_in server_addr, client_addr; // Network address structures
+	int client_socket_fd, client_address_length;					 // Store client socket and address length
+	struct sockaddr_in server_address_struct, client_address_struct; // Network address structures
 
 	// Step 1: Initialize synchronization primitives
-	sem_init(&seamaphore, 0, MAX_CLIENTS); // Semaphore to limit concurrent threads
-	pthread_mutex_init(&lock, NULL);	   // Mutex for thread-safe cache operations
+	sem_init(&connection_semaphore, 0, MAX_CLIENTS); // Semaphore to limit concurrent threads
+	pthread_mutex_init(&cache_mutex_lock, NULL);	 // Mutex for thread-safe cache operations
 
 	// Step 2: Parse command line arguments
 	if (argc == 2) // Expect: ./proxy <port>
 	{
-		port_number = atoi(argv[1]); // Convert string to integer
+		proxy_server_port = atoi(argv[1]); // Convert string to integer
 	}
 	else
 	{
@@ -678,13 +678,13 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("Setting Proxy Server Port : %d\n", port_number);
+	printf("Setting Proxy Server Port : %d\n", proxy_server_port);
 
 	// Step 3: Create main server socket
 	// AF_INET = IPv4, SOCK_STREAM = TCP, 0 = default protocol
-	proxy_socketId = socket(AF_INET, SOCK_STREAM, 0);
+	proxy_server_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (proxy_socketId < 0)
+	if (proxy_server_socket_fd < 0)
 	{
 		perror("Failed to create socket.\n");
 		exit(1);
@@ -693,76 +693,76 @@ int main(int argc, char *argv[])
 	// Step 4: Configure socket options
 	// SO_REUSEADDR allows immediate reuse of port after server restart
 	// Without this, you'd get "Address already in use" errors
-	int reuse = 1;
-	if (setsockopt(proxy_socketId, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse)) < 0)
+	int socket_reuse_option = 1;
+	if (setsockopt(proxy_server_socket_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&socket_reuse_option, sizeof(socket_reuse_option)) < 0)
 		perror("setsockopt(SO_REUSEADDR) failed\n");
 
 	// Step 5: Configure server address structure
-	bzero((char *)&server_addr, sizeof(server_addr)); // Clear structure
-	server_addr.sin_family = AF_INET;				  // IPv4
-	server_addr.sin_port = htons(port_number);		  // Convert port to network byte order
-	server_addr.sin_addr.s_addr = INADDR_ANY;		  // Accept connections on any interface
+	bzero((char *)&server_address_struct, sizeof(server_address_struct)); // Clear structure
+	server_address_struct.sin_family = AF_INET;							  // IPv4
+	server_address_struct.sin_port = htons(proxy_server_port);			  // Convert port to network byte order
+	server_address_struct.sin_addr.s_addr = INADDR_ANY;					  // Accept connections on any interface
 
 	// Step 6: Bind socket to address and port
-	if (bind(proxy_socketId, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+	if (bind(proxy_server_socket_fd, (struct sockaddr *)&server_address_struct, sizeof(server_address_struct)) < 0)
 	{
 		perror("Port is not free\n");
 		exit(1);
 	}
-	printf("Binding on port: %d\n", port_number);
+	printf("Binding on port: %d\n", proxy_server_port);
 
 	// Step 7: Start listening for connections
 	// MAX_CLIENTS defines the connection backlog queue size
-	int listen_status = listen(proxy_socketId, MAX_CLIENTS);
+	int listen_operation_result = listen(proxy_server_socket_fd, MAX_CLIENTS);
 
-	if (listen_status < 0)
+	if (listen_operation_result < 0)
 	{
 		perror("Error while Listening !\n");
 		exit(1);
 	}
 
 	// Step 8: Initialize client connection tracking
-	int i = 0;							 // Thread counter
-	int Connected_socketId[MAX_CLIENTS]; // Array to store client socket descriptors
-										 // Critical: What if i exceeds MAX_CLIENTS?
+	int thread_counter = 0;					 // Thread counter
+	int client_socket_fd_array[MAX_CLIENTS]; // Array to store client socket descriptors
+											 // Critical: What if thread_counter exceeds MAX_CLIENTS?
 
 	// Step 9: Main server loop - accept connections infinitely
 	printf("Proxy server started successfully. Waiting for connections...\n");
 	while (1)
 	{
 		// Clear client address structure
-		bzero((char *)&client_addr, sizeof(client_addr));
-		client_len = sizeof(client_addr);
+		bzero((char *)&client_address_struct, sizeof(client_address_struct));
+		client_address_length = sizeof(client_address_struct);
 
 		// Accept incoming connection (blocking call)
-		client_socketId = accept(proxy_socketId, (struct sockaddr *)&client_addr, (socklen_t *)&client_len);
-		if (client_socketId < 0)
+		client_socket_fd = accept(proxy_server_socket_fd, (struct sockaddr *)&client_address_struct, (socklen_t *)&client_address_length);
+		if (client_socket_fd < 0)
 		{
 			fprintf(stderr, "Error in Accepting connection !\n");
 			exit(1);
 		}
 		else
 		{
-			Connected_socketId[i] = client_socketId; // Store client socket
+			client_socket_fd_array[thread_counter] = client_socket_fd; // Store client socket
 		}
 
 		// Step 10: Extract client connection information
-		struct sockaddr_in *client_pt = (struct sockaddr_in *)&client_addr; // Cast to sockaddr_in
-		struct in_addr ip_addr = client_pt->sin_addr;						// Extract IP address
-		char str[INET_ADDRSTRLEN];											// Buffer for IP string representation
-		inet_ntop(AF_INET, &ip_addr, str, INET_ADDRSTRLEN);					// Convert IP to string
-		printf("Client is connected with port number: %d and ip address: %s \n", ntohs(client_addr.sin_port), str);
+		struct sockaddr_in *client_address_pointer = (struct sockaddr_in *)&client_address_struct; // Cast to sockaddr_in
+		struct in_addr client_ip_address = client_address_pointer->sin_addr;					   // Extract IP address
+		char client_ip_string[INET_ADDRSTRLEN];													   // Buffer for IP string representation
+		inet_ntop(AF_INET, &client_ip_address, client_ip_string, INET_ADDRSTRLEN);				   // Convert IP to string
+		printf("Client is connected with port number: %d and ip address: %s \n", ntohs(client_address_struct.sin_port), client_ip_string);
 
 		// Step 11: Create dedicated thread for this client
 		// Each client gets its own thread to prevent blocking
-		pthread_create(&tid[i], NULL, thread_fn, (void *)&Connected_socketId[i]);
-		i++; // Increment thread counter
-			 // BUG: What happens when i reaches MAX_CLIENTS?
+		pthread_create(&client_thread_ids[thread_counter], NULL, thread_fn, (void *)&client_socket_fd_array[thread_counter]);
+		thread_counter++; // Increment thread counter
+						  // BUG: What happens when thread_counter reaches MAX_CLIENTS?
 	}
 
 	// This code is never reached due to infinite loop above
 	// Should we add signal handling for graceful shutdown?
-	close(proxy_socketId);
+	close(proxy_server_socket_fd);
 	return 0;
 }
 
@@ -797,48 +797,48 @@ int main(int argc, char *argv[])
 cache_element *find(char *url)
 {
 	// Initialize search pointer - will traverse the entire cache linked list
-	cache_element *site = NULL;
+	cache_element *current_cache_element = NULL;
 
 	// Step 1: Acquire exclusive lock for thread-safe cache access
 	// Critical section: protects shared cache data structure from race conditions
 	// Multiple threads might try to read/write cache simultaneously
-	int temp_lock_val = pthread_mutex_lock(&lock);
-	printf("Cache Search Lock Acquired %d\n", temp_lock_val); // Debug output
+	int mutex_lock_result = pthread_mutex_lock(&cache_mutex_lock);
+	printf("Cache Search Lock Acquired %d\n", mutex_lock_result); // Debug output
 
 	// Step 2: Check if cache contains any elements
-	if (head != NULL)
+	if (cache_head_pointer != NULL)
 	{
 		// Cache is not empty - begin linear search from head
-		site = head;
+		current_cache_element = cache_head_pointer;
 
 		// Step 3: Traverse linked list to find matching URL
 		// Time Complexity: O(n) where n = number of cached responses
 		// Space Complexity: O(1) - only using pointer traversal
-		while (site != NULL)
+		while (current_cache_element != NULL)
 		{
 			// Step 4: Compare current cache element URL with search target
 			// strcmp returns 0 for exact string match
 			// Note: This is case-sensitive and requires exact URL match
-			if (!strcmp(site->url, url))
+			if (!strcmp(current_cache_element->url, url))
 			{
 				// CACHE HIT: Found matching URL in cache
-				printf("LRU Time Track Before: %ld", site->lru_time_track);
+				printf("LRU Time Track Before: %ld", current_cache_element->lru_time_track);
 				printf("\nURL found in cache\n");
 
 				// Step 5: Update LRU timestamp - mark as recently accessed
 				// This is crucial for LRU eviction policy
 				// Most recently used items have highest timestamps
-				site->lru_time_track = time(NULL); // Current Unix timestamp
-				printf("LRU Time Track After: %ld", site->lru_time_track);
+				current_cache_element->lru_time_track = time(NULL); // Current Unix timestamp
+				printf("LRU Time Track After: %ld", current_cache_element->lru_time_track);
 
 				break; // Exit search loop - we found our target
 			}
 
 			// Move to next element in linked list
-			site = site->next;
+			current_cache_element = current_cache_element->next;
 		}
 
-		// If we exit the loop with site == NULL, URL was not found
+		// If we exit the loop with current_cache_element == NULL, URL was not found
 	}
 	else
 	{
@@ -847,12 +847,12 @@ cache_element *find(char *url)
 	}
 
 	// Step 6: Release mutex lock and return result
-	temp_lock_val = pthread_mutex_unlock(&lock);
-	printf("Cache Search Lock Released %d\n", temp_lock_val);
+	mutex_lock_result = pthread_mutex_unlock(&cache_mutex_lock);
+	printf("Cache Search Lock Released %d\n", mutex_lock_result);
 
 	// Return value: pointer to cache element if found, NULL if not found
 	// Caller should check for NULL before accessing returned pointer
-	return site;
+	return current_cache_element;
 }
 
 /*
@@ -887,59 +887,61 @@ cache_element *find(char *url)
 void remove_cache_element()
 {
 	// Pointer management for safe linked list traversal and removal
-	cache_element *p;	 // Previous pointer - tracks element before target
-	cache_element *q;	 // Current pointer - used for list traversal
-	cache_element *temp; // Target pointer - points to element to be removed
+	cache_element *previous_element_pointer;  // Previous pointer - tracks element before target
+	cache_element *current_traversal_pointer; // Current pointer - used for list traversal
+	cache_element *lru_element_to_remove;	  // Target pointer - points to element to be removed
 
 	// Step 1: Acquire exclusive lock for thread-safe cache modification
 	// Critical section: prevents race conditions during cache structure changes
-	int temp_lock_val = pthread_mutex_lock(&lock);
-	printf("Cache Eviction Lock Acquired %d\n", temp_lock_val);
+	int mutex_lock_result = pthread_mutex_lock(&cache_mutex_lock);
+	printf("Cache Eviction Lock Acquired %d\n", mutex_lock_result);
 
 	// Step 2: Verify cache is not empty before attempting removal
-	if (head != NULL)
+	if (cache_head_pointer != NULL)
 	{
 		// Cache contains at least one element - proceed with LRU search
 
 		// Step 3: Initialize pointers for LRU element identification
 		// All three pointers start at head - we'll update them during traversal
-		for (q = head, p = head, temp = head; q->next != NULL; q = q->next)
+		for (current_traversal_pointer = cache_head_pointer, previous_element_pointer = cache_head_pointer, lru_element_to_remove = cache_head_pointer;
+			 current_traversal_pointer->next != NULL;
+			 current_traversal_pointer = current_traversal_pointer->next)
 		{
 			// Step 4: Compare timestamps to find least recently used element
 			// Lower timestamp = older access time = higher priority for eviction
-			if (((q->next)->lru_time_track) < (temp->lru_time_track))
+			if (((current_traversal_pointer->next)->lru_time_track) < (lru_element_to_remove->lru_time_track))
 			{
-				temp = q->next; // Update target to older element
-				p = q;			// Update previous pointer for safe removal
+				lru_element_to_remove = current_traversal_pointer->next; // Update target to older element
+				previous_element_pointer = current_traversal_pointer;	 // Update previous pointer for safe removal
 			}
 		}
 
 		// Step 5: Remove target element from linked list
 		// Handle two cases: target is head vs. target is middle/end
-		if (temp == head)
+		if (lru_element_to_remove == cache_head_pointer)
 		{
 			// Special case: LRU element is the head of the list
 			// Update head pointer to second element (or NULL if only one element)
-			head = head->next;
+			cache_head_pointer = cache_head_pointer->next;
 		}
 		else
 		{
 			// General case: LRU element is not the head
 			// Bridge the gap: previous element points to element after target
-			p->next = temp->next;
+			previous_element_pointer->next = lru_element_to_remove->next;
 		}
 
 		// Step 6: Update global cache size counter
 		// Subtract: response data size + cache element metadata + URL string + null terminator
 		// This calculation must match the addition in add_cache_element()
-		cache_size = cache_size - (temp->len) - sizeof(cache_element) - strlen(temp->url) - 1;
+		total_cache_size_bytes = total_cache_size_bytes - (lru_element_to_remove->len) - sizeof(cache_element) - strlen(lru_element_to_remove->url) - 1;
 
 		// Step 7: Free all memory associated with removed element
 		// Order matters: free data first, then URL, then struct
 		// This prevents memory leaks and dangling pointers
-		free(temp->data); // Free HTTP response data
-		free(temp->url);  // Free URL string (cache key)
-		free(temp);		  // Free cache element structure
+		free(lru_element_to_remove->data); // Free HTTP response data
+		free(lru_element_to_remove->url);  // Free URL string (cache key)
+		free(lru_element_to_remove);	   // Free cache element structure
 
 		printf("Cache element evicted - LRU policy applied\n");
 	}
@@ -951,8 +953,8 @@ void remove_cache_element()
 	}
 
 	// Step 8: Release mutex lock
-	temp_lock_val = pthread_mutex_unlock(&lock);
-	printf("Cache Eviction Lock Released %d\n", temp_lock_val);
+	mutex_lock_result = pthread_mutex_unlock(&cache_mutex_lock);
+	printf("Cache Eviction Lock Released %d\n", mutex_lock_result);
 }
 
 /*
@@ -986,28 +988,28 @@ void remove_cache_element()
  * - What about implementing cache warming strategies?
  */
 
-int add_cache_element(char *data, int size, char *url)
+int add_cache_element(char *http_response_data, int response_data_size, char *cache_url_key)
 {
 	// Step 1: Acquire exclusive lock for thread-safe cache modification
 	// Critical section: prevents race conditions during cache structure changes
-	int temp_lock_val = pthread_mutex_lock(&lock);
-	printf("Cache Addition Lock Acquired %d\n", temp_lock_val);
+	int mutex_lock_result = pthread_mutex_lock(&cache_mutex_lock);
+	printf("Cache Addition Lock Acquired %d\n", mutex_lock_result);
 
 	// Step 2: Calculate total memory footprint of new cache element
 	// Memory components: response data + URL string + null terminator + struct metadata
 	// This calculation is crucial for accurate cache size management
-	int element_size = size + 1 + strlen(url) + sizeof(cache_element);
+	int new_element_total_size = response_data_size + 1 + strlen(cache_url_key) + sizeof(cache_element);
 
 	// Step 3: Validate element size against maximum allowed size
 	// Prevents single large responses from dominating or breaking the cache
 	// Example: A 50MB video response would be rejected if MAX_ELEMENT_SIZE is 10MB
-	if (element_size > MAX_ELEMENT_SIZE)
+	if (new_element_total_size > MAX_ELEMENT_SIZE)
 	{
 		// Element too large for cache - reject insertion
-		temp_lock_val = pthread_mutex_unlock(&lock);
-		printf("Cache Addition Lock Released %d\n", temp_lock_val);
+		mutex_lock_result = pthread_mutex_unlock(&cache_mutex_lock);
+		printf("Cache Addition Lock Released %d\n", mutex_lock_result);
 		printf("Warning: Element size (%d bytes) exceeds maximum (%d bytes) - not cached\n",
-			   element_size, MAX_ELEMENT_SIZE);
+			   new_element_total_size, MAX_ELEMENT_SIZE);
 
 		// Return 0 to indicate cache insertion failed
 		// Caller should handle this gracefully (request still works, just not cached)
@@ -1020,7 +1022,7 @@ int add_cache_element(char *data, int size, char *url)
 		// Step 4: Ensure sufficient cache space through eviction
 		// Keep removing LRU elements until we have enough space for new element
 		// This loop implements the cache size limit enforcement
-		while (cache_size + element_size > MAX_SIZE)
+		while (total_cache_size_bytes + new_element_total_size > MAX_SIZE)
 		{
 			// Evict least recently used element to make space
 			// Note: remove_cache_element() handles empty cache gracefully
@@ -1030,37 +1032,37 @@ int add_cache_element(char *data, int size, char *url)
 
 		// Step 5: Allocate memory for new cache element and its data
 		// Three separate allocations: struct, response data, URL string
-		cache_element *element = (cache_element *)malloc(sizeof(cache_element));
+		cache_element *new_cache_element = (cache_element *)malloc(sizeof(cache_element));
 
-		// Allocate memory for HTTP response data (size + 1 for null terminator)
-		element->data = (char *)malloc(size + 1);
-		strcpy(element->data, data); // Copy complete HTTP response
+		// Allocate memory for HTTP response data (response_data_size + 1 for null terminator)
+		new_cache_element->data = (char *)malloc(response_data_size + 1);
+		strcpy(new_cache_element->data, http_response_data); // Copy complete HTTP response
 
 		// Allocate memory for URL string (cache key)
 		// Size calculation: URL length + 1 for null terminator
-		element->url = (char *)malloc(1 + (strlen(url) * sizeof(char)));
-		strcpy(element->url, url); // Copy URL for cache key lookup
+		new_cache_element->url = (char *)malloc(1 + (strlen(cache_url_key) * sizeof(char)));
+		strcpy(new_cache_element->url, cache_url_key); // Copy URL for cache key lookup
 
 		// Step 6: Initialize cache element metadata
-		element->lru_time_track = time(NULL); // Current timestamp - marks as most recently used
-		element->len = size;				  // Store response size for memory management
+		new_cache_element->lru_time_track = time(NULL); // Current timestamp - marks as most recently used
+		new_cache_element->len = response_data_size;	// Store response size for memory management
 
 		// Step 7: Insert new element at head of linked list
 		// Head position = most recently used position in LRU ordering
 		// This maintains LRU invariant: head = newest, tail = oldest
-		element->next = head; // New element points to current head
-		head = element;		  // Update head to point to new element
+		new_cache_element->next = cache_head_pointer; // New element points to current head
+		cache_head_pointer = new_cache_element;		  // Update head to point to new element
 
 		// Step 8: Update global cache size counter
 		// Add total memory footprint to running total
-		cache_size += element_size;
+		total_cache_size_bytes += new_element_total_size;
 
 		printf("Cache element added successfully - Size: %d bytes, Total cache: %d bytes\n",
-			   element_size, cache_size);
+			   new_element_total_size, total_cache_size_bytes);
 
 		// Step 9: Release mutex lock and return success
-		temp_lock_val = pthread_mutex_unlock(&lock);
-		printf("Cache Addition Lock Released %d\n", temp_lock_val);
+		mutex_lock_result = pthread_mutex_unlock(&cache_mutex_lock);
+		printf("Cache Addition Lock Released %d\n", mutex_lock_result);
 
 		// Return 1 to indicate successful cache insertion
 		return 1;
